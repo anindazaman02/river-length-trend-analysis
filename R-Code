@@ -1,0 +1,164 @@
+# Load libraries
+
+library(readxl)
+library(writexl)
+library(ggplot2)
+library(broom)
+library(dplyr)
+library(extrafont)
+
+# Load Times New Roman font
+loadfonts(device = "win")  # If not working, replace with base_family = "serif"
+
+
+# File paths
+
+in_path  <- "E:/8th Semester/Research/River/shape file/River length.xlsx"
+out_dir  <- dirname(in_path)
+excel_out <- file.path(out_dir, "river_length_regression_results.xlsx")
+plot_scatter_out <- file.path(out_dir, "river_length_regression_plot.png")
+plot_diag_resid_out <- file.path(out_dir, "river_length_residuals_vs_fitted.png")
+plot_diag_qq_out <- file.path(out_dir, "river_length_qq_plot.png")
+model_rds_out <- file.path(out_dir, "river_length_lm_model.rds")
+
+
+# Load and prepare data
+
+df <- read_excel(in_path)
+stopifnot(all(c("Year", "Length") %in% names(df)))
+
+df <- df %>%
+  mutate(
+    Year = as.numeric(Year),
+    Length = as.numeric(Length)
+  ) %>%
+  filter(!is.na(Year), !is.na(Length))
+
+
+# Fit linear regression model
+
+model <- lm(Length ~ Year, data = df)
+smry <- summary(model)
+
+# Extract statistics
+slope <- coef(model)[2]
+intercept <- coef(model)[1]
+p_value <- smry$coefficients[2, 4]
+r_squared <- smry$r.squared
+adj_r_squared <- smry$adj.r.squared
+SEE <- sqrt(sum(residuals(model)^2) / (nobs(model) - 2))  # Standard Error of Estimate
+confint_vals <- confint(model, level = 0.95)
+ci_lower <- confint_vals["Year", 1]
+ci_upper <- confint_vals["Year", 2]
+
+
+# Save tables to Excel
+
+summary_tbl <- tibble::tibble(
+  Metric = c("Intercept (km)", "Slope (km/year)", "p-value (Slope)", "R-squared",
+             "Adj R-squared", "N", "SEE (km)", "95% CI Lower (Slope)", "95% CI Upper (Slope)"),
+  Value  = c(intercept, slope, p_value, r_squared, adj_r_squared, nobs(model),
+             SEE, ci_lower, ci_upper)
+)
+
+coeff_tbl <- tidy(model)
+
+augment_tbl <- augment(model, data = df) %>%
+  rename(Fitted = .fitted, Residual = .resid)
+
+year_grid <- tibble::tibble(Year = seq(floor(min(df$Year)), ceiling(max(df$Year)), by = 1))
+pred_tbl <- augment(model, newdata = year_grid, se_fit = TRUE) %>%
+  mutate(
+    lwr_95 = .fitted - 1.96 * .se.fit,
+    upr_95 = .fitted + 1.96 * .se.fit
+  ) %>%
+  rename(Fitted = .fitted, SE_Fit = .se.fit)
+
+write_xlsx(
+  list(
+    Summary = summary_tbl,
+    Coefficients = coeff_tbl,
+    Fitted_Residuals = augment_tbl,
+    Predictions_95CI = pred_tbl
+  ),
+  path = excel_out
+)
+
+
+# Custom Plot Theme (Times New Roman, clean, large font)
+
+base_theme <- theme_classic(base_family = "Times New Roman", base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+
+
+# Plot: Scatter + Regression Line + 95% CI + Annotation
+
+ann_text <- paste0(
+  "Length = ", round(intercept, 2), " + ", round(slope, 2), " × Year\n",
+  "R² = ", round(r_squared, 3), " | p = ", formatC(p_value, format = "e", digits = 2), "\n",
+  "SEE = ", round(SEE, 2), " km\n",
+  "95% CI Slope: ", round(ci_lower, 2), " to ", round(ci_upper, 2)
+)
+
+p_scatter <- ggplot(df, aes(x = Year, y = Length)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "blue") +
+  labs(
+    title = "River Length vs Year (Linear Trend)",
+    x = "Year",
+    y = "River Length (km)"
+  ) +
+  annotate("text",
+           x = min(df$Year) + 0.02 * diff(range(df$Year)),
+           y = max(df$Length) - 0.02 * diff(range(df$Length)),
+           label = ann_text, hjust = 0, vjust = 1, size = 4, family = "Times New Roman") +
+  base_theme
+
+ggsave(plot_scatter_out, p_scatter, width = 7, height = 5, dpi = 300)
+
+
+# Plot: Residuals vs Fitted
+
+p_resid <- ggplot(augment_tbl, aes(x = Fitted, y = Residual)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs Fitted",
+    x = "Fitted Length (km)",
+    y = "Residuals (km)"
+  ) +
+  base_theme
+
+ggsave(plot_diag_resid_out, p_resid, width = 7, height = 5, dpi = 300)
+
+
+# Plot: Q–Q Plot of Residuals
+
+p_qq <- ggplot(data.frame(sample = residuals(model)), aes(sample = sample)) +
+  stat_qq(size = 2) +
+  stat_qq_line() +
+  labs(
+    title = "Normal Q–Q Plot of Residuals",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  base_theme
+
+ggsave(plot_diag_qq_out, p_qq, width = 7, height = 5, dpi = 300)
+
+
+# Save model object (optional)
+
+saveRDS(model, model_rds_out)
+
+
+cat("\n All results saved successfully:\n")
+cat("- Excel output:", excel_out, "\n")
+cat("- Scatter plot:", plot_scatter_out, "\n")
+cat("- Residuals vs Fitted:", plot_diag_resid_out, "\n")
+cat("- Q-Q plot:", plot_diag_qq_out, "\n")
+cat("- Model (RDS):", model_rds_out, "\n")
